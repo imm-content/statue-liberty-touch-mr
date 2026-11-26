@@ -9,7 +9,7 @@
 #gesture{position:fixed;inset:0;z-index:2;touch-action:none;user-select:none;-webkit-user-select:none}
 #info{position:fixed;top:0;left:0;right:0;z-index:4;padding:16px 16px 26px;background:linear-gradient(#101d2be8,#101d2b00);pointer-events:none}h1{font-size:clamp(19px,4.6vw,27px);margin:0 0 10px}#status{font-size:clamp(13px,3.5vw,17px);line-height:1.5;color:#e1f2ff;max-width:650px}
 #credit{position:fixed;right:12px;top:112px;font-size:11px;color:#d2edff;z-index:4;pointer-events:auto}#credit a{color:#d2edff}
-#controls{position:fixed;bottom:calc(96px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);z-index:6;display:flex;justify-content:center;align-items:center;gap:12px}button{border:1px solid #ffffff88;background:#193955ed;color:#fff;border-radius:14px;padding:13px 22px;font-size:17px;font-weight:700;touch-action:manipulation}#reset{display:none}#ar-entry{position:fixed;bottom:calc(30px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);z-index:6;background:#1c8a68;min-width:150px;display:none}
+#controls{position:fixed;bottom:calc(96px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);z-index:6;display:flex;justify-content:center;align-items:center;gap:12px}button{border:1px solid #ffffff88;background:#193955ed;color:#fff;border-radius:14px;padding:13px 22px;font-size:17px;font-weight:700;touch-action:manipulation}#reset,#place{display:none}#place{background:#16865d}#place:disabled{opacity:.5}#aim{display:none;position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:4;color:white;font-size:34px;text-shadow:0 0 5px black;pointer-events:none}#ar-entry{position:fixed;bottom:calc(30px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);z-index:6;background:#1c8a68;min-width:150px;display:none}
 #footer{position:fixed;bottom:calc(7px + env(safe-area-inset-bottom));left:8px;right:8px;z-index:4;text-align:center;color:#b9c6d3;font-size:10px;pointer-events:none}
 </style>
 <script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.164.1/examples/jsm/"}}</script>
@@ -18,7 +18,7 @@
 <div id="gesture" aria-label="모형 배치 및 손가락 조작 영역"></div>
 <div id="info"><h1>🗽 내 책상 위의 자유의 여신상</h1><div id="status">3D 모델을 불러오는 중입니다.</div></div>
 <div id="credit">3D: <a href="https://sketchfab.com/3d-models/statue-of-liberty-1-b3105217169b4ebbabeefb1d97e3696c" target="_blank" rel="noopener">tech.service.allwe</a> · <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a></div>
-<div id="controls"><button id="reset" type="button">재배치</button></div>
+<div id="aim" aria-hidden="true">＋</div><div id="controls"><button id="place" type="button" disabled>배치</button><button id="reset" type="button">재배치</button></div>
 <button id="ar-entry" type="button">AR 시작</button>
 <div id="footer">3D 모델: statue_of_liberty (1) © tech.service.allwe · CC BY 4.0</div>
 <script type="module">
@@ -28,26 +28,25 @@ import {ARButton} from 'three/addons/webxr/ARButton.js';
 const status=document.getElementById('status'),entry=document.getElementById('ar-entry'),reset=document.getElementById('reset'),gesture=document.getElementById('gesture');
 const scene=new THREE.Scene(),camera=new THREE.PerspectiveCamera(65,innerWidth/innerHeight,.01,100);
 const renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});
-renderer.setPixelRatio(Math.min(devicePixelRatio,1.5));renderer.setSize(innerWidth,innerHeight);renderer.xr.enabled=true;renderer.outputColorSpace=THREE.SRGBColorSpace;
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.setSize(innerWidth,innerHeight);renderer.xr.enabled=true;renderer.outputColorSpace=THREE.SRGBColorSpace;
 document.body.insertBefore(renderer.domElement,gesture);
 scene.add(new THREE.HemisphereLight(0xffffff,0x657789,2.3));const light=new THREE.DirectionalLight(0xffffff,2);light.position.set(1,3,2);scene.add(light);
 const statue=new THREE.Group();scene.add(statue);statue.visible=false;
-const reticle=new THREE.Mesh(new THREE.RingGeometry(.065,.085,64).rotateX(-Math.PI/2),new THREE.MeshBasicMaterial({color:0x00ff00,side:THREE.DoubleSide,depthTest:false,depthWrite:false}));reticle.matrixAutoUpdate=false;reticle.frustumCulled=false;reticle.renderOrder=999;reticle.visible=false;scene.add(reticle);
-let ready=false,placed=false,sessionActive=false,hitSource=null,hitRequested=false,baseScale=1,domOverlayAvailable=false;
-let nextRetry=0,scanStarted=0,lastNotice=0,attempts=0,sessionGeneration=0;
-const extraSources=new Map(), pendingRays=new Set();
-let viewerSpace=null, viewerPending=false, arPressed=0, firstHit=false;
-const rays=[[0,0],[0,-.25],[-.22,-.12],[.22,-.12],[0,-.48]];
+const placeButton=document.getElementById('place'),aim=document.getElementById('aim');
+let ready=false,placed=false,sessionActive=false,baseScale=1,domOverlayAvailable=false,placementPending=false,poseAvailable=false;
+const distance=0.8;
 const pointers=new Map();let lastCenter=null,lastDistance=0,moved=false;
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
-function place(){if(!ready||!sessionActive||placed||!reticle.visible)return;reticle.matrix.decompose(statue.position,new THREE.Quaternion(),new THREE.Vector3());statue.rotation.set(0,0,0);statue.scale.setScalar(baseScale);statue.visible=true;placed=true;reticle.visible=false;status.textContent='배치 완료! 한 손가락으로 좌우·상하 회전, 두 손가락으로 이동·확대·축소하세요.';}
-new GLTFLoader().load('./statue_of_liberty_1.glb',g=>{const model=g.scene;model.updateMatrixWorld(true);const bounds=new THREE.Box3().setFromObject(model),size=bounds.getSize(new THREE.Vector3()),center=bounds.getCenter(new THREE.Vector3());if(size.y<=0){status.textContent='모형 크기를 읽을 수 없습니다.';return;}model.position.set(-center.x,-bounds.min.y,-center.z);statue.add(model);baseScale=.28/size.y;statue.scale.setScalar(baseScale);ready=true;if(!sessionActive){status.textContent='모형 준비 완료. 스마트폰 Chrome에서 AR 시작을 누르세요.';statue.visible=true;statue.position.set(0,-.15,-1.2);camera.position.set(0,.08,0);camera.lookAt(0,0,-1.2);}},undefined,e=>{console.error(e);status.textContent='모형을 불러오지 못했습니다. GLB 파일명을 확인하세요.';});
-const arButton=ARButton.createButton(renderer,{requiredFeatures:['hit-test'],optionalFeatures:['dom-overlay'],domOverlay:{root:document.body}});arButton.style.display='none';document.body.appendChild(arButton);
-if(navigator.xr){navigator.xr.isSessionSupported('immersive-ar').then(ok=>{if(ok){entry.style.display='block';entry.onclick=()=>{arPressed=performance.now();arButton.click();};}else status.textContent='이 브라우저는 AR을 지원하지 않습니다. 3D 미리보기만 가능합니다.';}).catch(console.error);}else status.textContent='WebXR 미지원 브라우저입니다. 3D 미리보기만 가능합니다.';
-renderer.xr.addEventListener('sessionstart',()=>{sessionGeneration++;viewerSpace=null;viewerPending=false;extraSources.clear();pendingRays.clear();firstHit=false;nextRetry=0;scanStarted=performance.now();lastNotice=0;attempts=0;sessionActive=true;placed=false;statue.visible=false;hitSource=null;hitRequested=false;reticle.visible=false;pointers.clear();entry.style.display='none';reset.style.display='block';const session=renderer.xr.getSession();domOverlayAvailable=!!session.domOverlayState;status.textContent=domOverlayAvailable?'책상을 천천히 비추세요. 초록 원이 보이면 화면을 한 번 터치해 배치하세요.':'책상을 비추고 초록 원이 보이면 화면을 터치하세요. (손가락 조작은 DOM Overlay 지원이 필요합니다.)';startScan(session);});
-renderer.xr.addEventListener('sessionend',()=>{sessionGeneration++;sessionActive=false;for(const source of extraSources.values())try{source.cancel();}catch(e){}extraSources.clear();pendingRays.clear();viewerSpace=null;viewerPending=false;hitSource?.cancel();hitSource=null;hitRequested=false;reticle.visible=false;placed=false;statue.visible=ready;statue.position.set(0,-.15,-1.2);statue.rotation.set(0,0,0);statue.scale.setScalar(baseScale);pointers.clear();entry.style.display='block';reset.style.display='none';status.textContent='AR 종료. 다시 시작할 수 있습니다.';});
-const controller=renderer.xr.getController(0);controller.addEventListener('select',()=>{if(!domOverlayAvailable)place();});scene.add(controller);
-reset.addEventListener('click',e=>{e.stopPropagation();if(!sessionActive)return;placed=false;firstHit=false;scanStarted=performance.now();lastNotice=0;statue.visible=false;reticle.visible=false;pointers.clear();status.textContent='재배치: 새 위치를 비추고 초록 원이 보이면 화면을 터치하세요.';});
+function place(){if(!ready||!sessionActive||placed)return;placementPending=true;status.textContent='배치 위치를 확인하는 중입니다.';}
+function updateButton(){placeButton.disabled=!ready||!poseAvailable||placed||placementPending;}
+placeButton.addEventListener('click',place);
+new GLTFLoader().load('./statue_of_liberty_1.glb',g=>{const model=g.scene;model.updateMatrixWorld(true);const bounds=new THREE.Box3().setFromObject(model),size=bounds.getSize(new THREE.Vector3()),center=bounds.getCenter(new THREE.Vector3());if(size.y<=0){status.textContent='모형 크기를 읽을 수 없습니다.';return;}model.position.set(-center.x,-bounds.min.y,-center.z);statue.add(model);baseScale=.28/size.y;statue.scale.setScalar(baseScale);ready=true;updateButton();if(!sessionActive){status.textContent='모형 준비 완료. 스마트폰 Chrome에서 AR 시작을 누르세요.';statue.visible=true;statue.position.set(0,-.15,-1.2);camera.position.set(0,.08,0);camera.lookAt(0,0,-1.2);}},undefined,e=>{console.error(e);status.textContent='모형을 불러오지 못했습니다. GLB 파일명을 확인하세요.';});
+const arButton=ARButton.createButton(renderer,{requiredFeatures:['dom-overlay'],optionalFeatures:[],domOverlay:{root:document.body}});arButton.style.display='none';document.body.appendChild(arButton);
+if(navigator.xr){navigator.xr.isSessionSupported('immersive-ar').then(ok=>{if(ok){entry.style.display='block';entry.onclick=()=>arButton.click();}else status.textContent='이 브라우저는 AR을 지원하지 않습니다. 3D 미리보기만 가능합니다.';}).catch(console.error);}else status.textContent='WebXR 미지원 브라우저입니다. 3D 미리보기만 가능합니다.';
+renderer.xr.addEventListener('sessionstart',()=>{sessionActive=true;placed=false;placementPending=false;poseAvailable=false;statue.visible=false;pointers.clear();entry.style.display='none';reset.style.display='block';placeButton.style.display='block';aim.style.display='block';updateButton();domOverlayAvailable=!!renderer.xr.getSession().domOverlayState;status.textContent='원하는 위치를 화면 중앙 +에 맞추고 배치 버튼을 누르세요.';});
+renderer.xr.addEventListener('sessionend',()=>{sessionActive=false;placementPending=false;poseAvailable=false;placed=false;statue.visible=ready;statue.position.set(0,-.15,-1.2);statue.rotation.set(0,0,0);statue.scale.setScalar(baseScale);pointers.clear();entry.style.display='block';reset.style.display='none';placeButton.style.display='none';aim.style.display='none';status.textContent='AR 종료. 다시 시작할 수 있습니다.';});
+reset.addEventListener('click',e=>{e.stopPropagation();if(!sessionActive)return;placed=false;placementPending=false;statue.visible=false;pointers.clear();resetPair();aim.style.display='block';updateButton();status.textContent='새 위치를 화면 중앙 +에 맞추고 배치 버튼을 누르세요.';});
+document.getElementById('controls').addEventListener('beforexrselect',e=>e.preventDefault());
 // WebXR DOM Overlay에서 select 이벤트가 중복 발생하지 않도록 방지
 // XR 입력과 DOM 손가락 이벤트를 분리해 드래그 중 의도치 않은 재배치를 막습니다.
 gesture.addEventListener('beforexrselect',e=>e.preventDefault());
@@ -58,89 +57,26 @@ gesture.addEventListener('pointermove',e=>{if(!pointers.has(e.pointerId))return;
 if(pointers.size===1){statue.rotation.y+=dx*.009;statue.rotation.x=clamp(statue.rotation.x+dy*.006,-Math.PI/3,Math.PI/3);}
 else if(pointers.size>=2){const p=pair();if(!p)return;if(lastDistance>0){const factor=clamp(p.d/lastDistance,.85,1.18);statue.scale.multiplyScalar(factor);statue.scale.setScalar(clamp(statue.scale.x,baseScale*.2,baseScale*5));}if(lastCenter){const mx=p.x-lastCenter.x,my=p.y-lastCenter.y;const cam=sessionActive?renderer.xr.getCamera(camera):camera;const q=new THREE.Quaternion();cam.getWorldQuaternion(q);const right=new THREE.Vector3(1,0,0).applyQuaternion(q);const up=new THREE.Vector3(0,1,0).applyQuaternion(q);const dist=Math.max(.2,statue.position.distanceTo(cam.getWorldPosition(new THREE.Vector3())));const speed=2*dist*Math.tan(THREE.MathUtils.degToRad(65)/2)/innerHeight;statue.position.addScaledVector(right,mx*speed);statue.position.addScaledVector(up,-my*speed);}lastCenter={x:p.x,y:p.y};lastDistance=p.d;}
 });
-function finish(e){if(!pointers.has(e.pointerId))return;e.preventDefault();const wasTap=pointers.size===1&&!moved;pointers.delete(e.pointerId);resetPair();if(wasTap&&sessionActive&&!placed)place();}
+function finish(e){if(!pointers.has(e.pointerId))return;e.preventDefault();const wasTap=pointers.size===1&&!moved;pointers.delete(e.pointerId);resetPair();}
 gesture.addEventListener('pointerup',finish);gesture.addEventListener('pointercancel',e=>{pointers.delete(e.pointerId);resetPair();});
 gesture.addEventListener('wheel',e=>{if(!ready||sessionActive)return;e.preventDefault();statue.scale.multiplyScalar(e.deltaY<0?1.08:.92);statue.scale.setScalar(clamp(statue.scale.x,baseScale*.2,baseScale*5));},{passive:false});
-// 중앙 및 주변 광선을 병렬 탐색. 실제 hit-test pose만 사용합니다.
-function startScan(session){
-    if(!session || !sessionActive || placed || performance.now()<nextRetry)return;
-    const generation=sessionGeneration;
-    if(!viewerSpace){
-        if(viewerPending)return;
-        viewerPending=true; attempts++;
-        session.requestReferenceSpace('viewer').then(space=>{
-            if(generation!==sessionGeneration)return;
-            viewerSpace=space; viewerPending=false; startScan(session);
-        }).catch(error=>{
-            if(generation!==sessionGeneration)return;
-            viewerPending=false;nextRetry=performance.now()+1000;
-            console.warn('Viewer reference space:',error);
-        });
-        return;
-    }
-    rays.forEach(([x,y],i)=>{
-        if(extraSources.has(i)||pendingRays.has(i))return;
-        pendingRays.add(i);
-        Promise.resolve().then(()=>{
-            const options={space:viewerSpace};
-            if(i!==0){
-                const length=Math.hypot(x,y,1);
-                options.offsetRay=new XRRay({x:0,y:0,z:0,w:1},{x:x/length,y:y/length,z:-1/length,w:0});
-            }
-            return session.requestHitTestSource(options);
-        }).then(source=>{
-            if(generation!==sessionGeneration||!sessionActive){source.cancel();return;}
-            extraSources.set(i,source);pendingRays.delete(i);
-        }).catch(error=>{
-            if(generation!==sessionGeneration)return;
-            pendingRays.delete(i);nextRetry=performance.now()+1000;
-            console.warn('Hit test ray',i,error);
-        });
-    });
-}
+// 표면 hit-test 없이 현재 XR 카메라의 실제 위치와 방향으로 배치합니다.
 renderer.setAnimationLoop((time,frame)=>{
-    if(sessionActive && frame && !placed){
-        const now=performance.now();
-        startScan(renderer.xr.getSession());
+    if(sessionActive && frame){
         const ref=renderer.xr.getReferenceSpace();
-        let pose=null,count=0,rayIndex=-1;
-        if(ref){
-            // 중앙 우선, 실패하면 주변 광선. 첫 유효 결과 즉시 표시.
-            for(let i=0;i<rays.length;i++){
-                const source=extraSources.get(i);if(!source)continue;
-                try{
-                    const hits=frame.getHitTestResults(source);count+=hits.length;
-                    for(const hit of hits){
-                        const candidate=hit.getPose(ref);
-                        if(candidate){pose=candidate;rayIndex=i;break;}
-                    }
-                    if(pose)break;
-                }catch(error){
-                    try{source.cancel();}catch(e){}
-                    extraSources.delete(i);nextRetry=now+1000;
-                    console.warn('Hit test frame',i,error);
-                }
-            }
+        const pose=ref?frame.getViewerPose(ref):null;
+        poseAvailable=!!pose;
+        if(placementPending && pose && ready){
+            const p=pose.transform.position,q=pose.transform.orientation;
+            const direction=new THREE.Vector3(0,0,-1).applyQuaternion(new THREE.Quaternion(q.x,q.y,q.z,q.w));
+            statue.position.set(p.x,p.y,p.z).addScaledVector(direction,distance);
+            statue.rotation.set(0,0,0);statue.scale.setScalar(baseScale);
+            // 중앙 조준점에 모형의 중심이 오도록 높이 보정
+            statue.position.y-=.14;
+            statue.visible=true;placed=true;placementPending=false;aim.style.display='none';
+            status.textContent='배치 완료! 한 손가락으로 회전, 두 손가락으로 이동·확대·축소하세요.';
         }
-        const wasVisible=reticle.visible;reticle.visible=!!pose;
-        const elapsed=((now-scanStarted)/1000).toFixed(1);
-        if(pose){
-            reticle.matrix.fromArray(pose.transform.matrix);reticle.matrixWorldNeedsUpdate=true;
-            if(!firstHit){
-                firstHit=true;
-                console.info('First hit',elapsed+'s','AR button to hit',arPressed?((now-arPressed)/1000).toFixed(1)+'s':'n/a','ray',rayIndex);
-                status.textContent=`표면 인식 완료 (${elapsed}초). 초록 원이 보이면 화면을 터치하세요.`;
-                lastNotice=now;
-            }else if(!wasVisible){status.textContent='표면 인식 완료. 초록 원이 보이면 화면을 터치하세요.';}
-            if(!ready)status.textContent='표면 인식 완료. 3D 모형을 불러오는 중입니다.';
-        }else if(wasVisible||now-lastNotice>=500){
-            status.textContent=!extraSources.size
-                ? `공간 인식 초기화 중… ${elapsed}초`
-                : Number(elapsed)>=3
-                    ? `표면 인식 중… ${elapsed}초 (${count}건). 무늬 있는 바닥이나 책상을 천천히 비추세요.`
-                    : `표면 인식 중… ${elapsed}초 (${count}건)`;
-            lastNotice=now;
-        }
+        updateButton();
     }
     renderer.render(scene,camera);
 });
