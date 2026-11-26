@@ -28,23 +28,26 @@ import {ARButton} from 'three/addons/webxr/ARButton.js';
 const status=document.getElementById('status'),entry=document.getElementById('ar-entry'),reset=document.getElementById('reset'),gesture=document.getElementById('gesture');
 const scene=new THREE.Scene(),camera=new THREE.PerspectiveCamera(65,innerWidth/innerHeight,.01,100);
 const renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});
-renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.setSize(innerWidth,innerHeight);renderer.xr.enabled=true;renderer.outputColorSpace=THREE.SRGBColorSpace;
+renderer.setPixelRatio(Math.min(devicePixelRatio,1.5));renderer.setSize(innerWidth,innerHeight);renderer.xr.enabled=true;renderer.outputColorSpace=THREE.SRGBColorSpace;
 document.body.insertBefore(renderer.domElement,gesture);
 scene.add(new THREE.HemisphereLight(0xffffff,0x657789,2.3));const light=new THREE.DirectionalLight(0xffffff,2);light.position.set(1,3,2);scene.add(light);
 const statue=new THREE.Group();scene.add(statue);statue.visible=false;
 const reticle=new THREE.Mesh(new THREE.RingGeometry(.065,.085,64).rotateX(-Math.PI/2),new THREE.MeshBasicMaterial({color:0x00ff00,side:THREE.DoubleSide,depthTest:false,depthWrite:false}));reticle.matrixAutoUpdate=false;reticle.frustumCulled=false;reticle.renderOrder=999;reticle.visible=false;scene.add(reticle);
 let ready=false,placed=false,sessionActive=false,hitSource=null,hitRequested=false,baseScale=1,domOverlayAvailable=false;
 let nextRetry=0,scanStarted=0,lastNotice=0,attempts=0,sessionGeneration=0;
+const extraSources=new Map(), pendingRays=new Set();
+let viewerSpace=null, viewerPending=false, arPressed=0, firstHit=false;
+const rays=[[0,0],[0,-.25],[-.22,-.12],[.22,-.12],[0,-.48]];
 const pointers=new Map();let lastCenter=null,lastDistance=0,moved=false;
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 function place(){if(!ready||!sessionActive||placed||!reticle.visible)return;reticle.matrix.decompose(statue.position,new THREE.Quaternion(),new THREE.Vector3());statue.rotation.set(0,0,0);statue.scale.setScalar(baseScale);statue.visible=true;placed=true;reticle.visible=false;status.textContent='배치 완료! 한 손가락으로 좌우·상하 회전, 두 손가락으로 이동·확대·축소하세요.';}
 new GLTFLoader().load('./statue_of_liberty_1.glb',g=>{const model=g.scene;model.updateMatrixWorld(true);const bounds=new THREE.Box3().setFromObject(model),size=bounds.getSize(new THREE.Vector3()),center=bounds.getCenter(new THREE.Vector3());if(size.y<=0){status.textContent='모형 크기를 읽을 수 없습니다.';return;}model.position.set(-center.x,-bounds.min.y,-center.z);statue.add(model);baseScale=.28/size.y;statue.scale.setScalar(baseScale);ready=true;if(!sessionActive){status.textContent='모형 준비 완료. 스마트폰 Chrome에서 AR 시작을 누르세요.';statue.visible=true;statue.position.set(0,-.15,-1.2);camera.position.set(0,.08,0);camera.lookAt(0,0,-1.2);}},undefined,e=>{console.error(e);status.textContent='모형을 불러오지 못했습니다. GLB 파일명을 확인하세요.';});
 const arButton=ARButton.createButton(renderer,{requiredFeatures:['hit-test'],optionalFeatures:['dom-overlay'],domOverlay:{root:document.body}});arButton.style.display='none';document.body.appendChild(arButton);
-if(navigator.xr){navigator.xr.isSessionSupported('immersive-ar').then(ok=>{if(ok){entry.style.display='block';entry.onclick=()=>arButton.click();}else status.textContent='이 브라우저는 AR을 지원하지 않습니다. 3D 미리보기만 가능합니다.';}).catch(console.error);}else status.textContent='WebXR 미지원 브라우저입니다. 3D 미리보기만 가능합니다.';
-renderer.xr.addEventListener('sessionstart',()=>{sessionGeneration++;nextRetry=0;scanStarted=performance.now();lastNotice=0;attempts=0;sessionActive=true;placed=false;statue.visible=false;hitSource=null;hitRequested=false;reticle.visible=false;pointers.clear();entry.style.display='none';reset.style.display='block';const session=renderer.xr.getSession();domOverlayAvailable=!!session.domOverlayState;status.textContent=domOverlayAvailable?'책상을 천천히 비추세요. 초록 원이 보이면 화면을 한 번 터치해 배치하세요.':'책상을 비추고 초록 원이 보이면 화면을 터치하세요. (손가락 조작은 DOM Overlay 지원이 필요합니다.)';});
-renderer.xr.addEventListener('sessionend',()=>{sessionGeneration++;sessionActive=false;hitSource?.cancel();hitSource=null;hitRequested=false;reticle.visible=false;placed=false;statue.visible=ready;statue.position.set(0,-.15,-1.2);statue.rotation.set(0,0,0);statue.scale.setScalar(baseScale);pointers.clear();entry.style.display='block';reset.style.display='none';status.textContent='AR 종료. 다시 시작할 수 있습니다.';});
+if(navigator.xr){navigator.xr.isSessionSupported('immersive-ar').then(ok=>{if(ok){entry.style.display='block';entry.onclick=()=>{arPressed=performance.now();arButton.click();};}else status.textContent='이 브라우저는 AR을 지원하지 않습니다. 3D 미리보기만 가능합니다.';}).catch(console.error);}else status.textContent='WebXR 미지원 브라우저입니다. 3D 미리보기만 가능합니다.';
+renderer.xr.addEventListener('sessionstart',()=>{sessionGeneration++;viewerSpace=null;viewerPending=false;extraSources.clear();pendingRays.clear();firstHit=false;nextRetry=0;scanStarted=performance.now();lastNotice=0;attempts=0;sessionActive=true;placed=false;statue.visible=false;hitSource=null;hitRequested=false;reticle.visible=false;pointers.clear();entry.style.display='none';reset.style.display='block';const session=renderer.xr.getSession();domOverlayAvailable=!!session.domOverlayState;status.textContent=domOverlayAvailable?'책상을 천천히 비추세요. 초록 원이 보이면 화면을 한 번 터치해 배치하세요.':'책상을 비추고 초록 원이 보이면 화면을 터치하세요. (손가락 조작은 DOM Overlay 지원이 필요합니다.)';startScan(session);});
+renderer.xr.addEventListener('sessionend',()=>{sessionGeneration++;sessionActive=false;for(const source of extraSources.values())try{source.cancel();}catch(e){}extraSources.clear();pendingRays.clear();viewerSpace=null;viewerPending=false;hitSource?.cancel();hitSource=null;hitRequested=false;reticle.visible=false;placed=false;statue.visible=ready;statue.position.set(0,-.15,-1.2);statue.rotation.set(0,0,0);statue.scale.setScalar(baseScale);pointers.clear();entry.style.display='block';reset.style.display='none';status.textContent='AR 종료. 다시 시작할 수 있습니다.';});
 const controller=renderer.xr.getController(0);controller.addEventListener('select',()=>{if(!domOverlayAvailable)place();});scene.add(controller);
-reset.addEventListener('click',e=>{e.stopPropagation();if(!sessionActive)return;placed=false;scanStarted=performance.now();lastNotice=0;statue.visible=false;reticle.visible=false;pointers.clear();status.textContent='재배치: 새 위치를 비추고 초록 원이 보이면 화면을 터치하세요.';});
+reset.addEventListener('click',e=>{e.stopPropagation();if(!sessionActive)return;placed=false;firstHit=false;scanStarted=performance.now();lastNotice=0;statue.visible=false;reticle.visible=false;pointers.clear();status.textContent='재배치: 새 위치를 비추고 초록 원이 보이면 화면을 터치하세요.';});
 // WebXR DOM Overlay에서 select 이벤트가 중복 발생하지 않도록 방지
 // XR 입력과 DOM 손가락 이벤트를 분리해 드래그 중 의도치 않은 재배치를 막습니다.
 gesture.addEventListener('beforexrselect',e=>e.preventDefault());
@@ -58,71 +61,85 @@ else if(pointers.size>=2){const p=pair();if(!p)return;if(lastDistance>0){const f
 function finish(e){if(!pointers.has(e.pointerId))return;e.preventDefault();const wasTap=pointers.size===1&&!moved;pointers.delete(e.pointerId);resetPair();if(wasTap&&sessionActive&&!placed)place();}
 gesture.addEventListener('pointerup',finish);gesture.addEventListener('pointercancel',e=>{pointers.delete(e.pointerId);resetPair();});
 gesture.addEventListener('wheel',e=>{if(!ready||sessionActive)return;e.preventDefault();statue.scale.multiplyScalar(e.deltaY<0?1.08:.92);statue.scale.setScalar(clamp(statue.scale.x,baseScale*.2,baseScale*5));},{passive:false});
-// 실제 WebXR hit-test 결과가 있을 때만 배치 원을 표시합니다.
+// 중앙 및 주변 광선을 병렬 탐색. 실제 hit-test pose만 사용합니다.
+function startScan(session){
+    if(!session || !sessionActive || placed || performance.now()<nextRetry)return;
+    const generation=sessionGeneration;
+    if(!viewerSpace){
+        if(viewerPending)return;
+        viewerPending=true; attempts++;
+        session.requestReferenceSpace('viewer').then(space=>{
+            if(generation!==sessionGeneration)return;
+            viewerSpace=space; viewerPending=false; startScan(session);
+        }).catch(error=>{
+            if(generation!==sessionGeneration)return;
+            viewerPending=false;nextRetry=performance.now()+1000;
+            console.warn('Viewer reference space:',error);
+        });
+        return;
+    }
+    rays.forEach(([x,y],i)=>{
+        if(extraSources.has(i)||pendingRays.has(i))return;
+        pendingRays.add(i);
+        Promise.resolve().then(()=>{
+            const options={space:viewerSpace};
+            if(i!==0){
+                const length=Math.hypot(x,y,1);
+                options.offsetRay=new XRRay({x:0,y:0,z:0,w:1},{x:x/length,y:y/length,z:-1/length,w:0});
+            }
+            return session.requestHitTestSource(options);
+        }).then(source=>{
+            if(generation!==sessionGeneration||!sessionActive){source.cancel();return;}
+            extraSources.set(i,source);pendingRays.delete(i);
+        }).catch(error=>{
+            if(generation!==sessionGeneration)return;
+            pendingRays.delete(i);nextRetry=performance.now()+1000;
+            console.warn('Hit test ray',i,error);
+        });
+    });
+}
 renderer.setAnimationLoop((time,frame)=>{
-    if(sessionActive && frame){
+    if(sessionActive && frame && !placed){
         const now=performance.now();
-        const session=renderer.xr.getSession();
-        if(session && !hitSource && !hitRequested && now>=nextRetry){
-            hitRequested=true;
-            attempts++;
-            const generation=sessionGeneration;
-            status.textContent=`공간 인식 초기화 중 (시도 ${attempts}회)…`;
-            session.requestReferenceSpace('viewer')
-                .then(space=>session.requestHitTestSource({space}))
-                .then(source=>{
-                    if(generation!==sessionGeneration || !sessionActive){
-                        source.cancel();
-                        return;
+        startScan(renderer.xr.getSession());
+        const ref=renderer.xr.getReferenceSpace();
+        let pose=null,count=0,rayIndex=-1;
+        if(ref){
+            // 중앙 우선, 실패하면 주변 광선. 첫 유효 결과 즉시 표시.
+            for(let i=0;i<rays.length;i++){
+                const source=extraSources.get(i);if(!source)continue;
+                try{
+                    const hits=frame.getHitTestResults(source);count+=hits.length;
+                    for(const hit of hits){
+                        const candidate=hit.getPose(ref);
+                        if(candidate){pose=candidate;rayIndex=i;break;}
                     }
-                    hitSource=source;
-                    hitRequested=false;
-                    scanStarted=performance.now();
-                    lastNotice=0;
-                    status.textContent='공간 인식 준비 완료. 책상을 천천히 비추세요.';
-                })
-                .catch(error=>{
-                    if(generation!==sessionGeneration || !sessionActive)return;
-                    console.error('Hit test initialization:',error);
-                    hitRequested=false;
-                    nextRetry=performance.now()+2000;
-                    status.textContent=`공간 인식 초기화 실패 (${error.name || '오류'}). 2초 후 재시도합니다.`;
-                });
-        }
-        if(hitSource && !placed){
-            let count=0;
-            let pose=null;
-            try{
-                const results=frame.getHitTestResults(hitSource);
-                count=results.length;
-                const referenceSpace=renderer.xr.getReferenceSpace();
-                if(count && referenceSpace)pose=results[0].getPose(referenceSpace);
-            }catch(error){
-                console.error('Hit test frame:',error);
-                try{hitSource.cancel();}catch(e){}
-                hitSource=null;
-                hitRequested=false;
-                nextRetry=now+2000;
-                status.textContent='공간 인식 오류. 2초 후 다시 연결합니다.';
-            }
-            const wasVisible=reticle.visible;
-            reticle.visible=!!pose;
-            if(pose){
-                reticle.matrix.fromArray(pose.transform.matrix);
-                reticle.matrixWorldNeedsUpdate=true;
-                if(!wasVisible || now-lastNotice>=1000){
-                    status.textContent=ready
-                        ? `표면 인식 완료 (${count}건). 초록 원이 보이면 화면을 한 번 터치하세요.`
-                        : '표면 인식 완료. 3D 모형을 불러오는 중입니다.';
-                    lastNotice=now;
+                    if(pose)break;
+                }catch(error){
+                    try{source.cancel();}catch(e){}
+                    extraSources.delete(i);nextRetry=now+1000;
+                    console.warn('Hit test frame',i,error);
                 }
-            }else if(hitSource && (wasVisible || now-lastNotice>=1000)){
-                const seconds=Math.floor((now-scanStarted)/1000);
-                status.textContent=seconds>=15
-                    ? `표면 인식 대기 ${seconds}초 (${count}건). 밝은 곳에서 무늬 있는 책상이나 바닥을 천천히 비추세요.`
-                    : `표면 인식 중… ${seconds}초 (${count}건). 스마트폰을 천천히 움직이세요.`;
-                lastNotice=now;
             }
+        }
+        const wasVisible=reticle.visible;reticle.visible=!!pose;
+        const elapsed=((now-scanStarted)/1000).toFixed(1);
+        if(pose){
+            reticle.matrix.fromArray(pose.transform.matrix);reticle.matrixWorldNeedsUpdate=true;
+            if(!firstHit){
+                firstHit=true;
+                console.info('First hit',elapsed+'s','AR button to hit',arPressed?((now-arPressed)/1000).toFixed(1)+'s':'n/a','ray',rayIndex);
+                status.textContent=`표면 인식 완료 (${elapsed}초). 초록 원이 보이면 화면을 터치하세요.`;
+                lastNotice=now;
+            }else if(!wasVisible){status.textContent='표면 인식 완료. 초록 원이 보이면 화면을 터치하세요.';}
+            if(!ready)status.textContent='표면 인식 완료. 3D 모형을 불러오는 중입니다.';
+        }else if(wasVisible||now-lastNotice>=500){
+            status.textContent=!extraSources.size
+                ? `공간 인식 초기화 중… ${elapsed}초`
+                : Number(elapsed)>=3
+                    ? `표면 인식 중… ${elapsed}초 (${count}건). 무늬 있는 바닥이나 책상을 천천히 비추세요.`
+                    : `표면 인식 중… ${elapsed}초 (${count}건)`;
+            lastNotice=now;
         }
     }
     renderer.render(scene,camera);
